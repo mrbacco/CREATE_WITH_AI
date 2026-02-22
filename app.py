@@ -19,6 +19,7 @@ from llm.openrouter_client import openrouter_bac_tool
 from llm.ollama_cloud_client import ollama_cloud_bac_tool
 
 from memory.memory_store import save_message, save_message_and_get_memory
+from memory.document_index import index_file as index_document_file, search_index, list_documents
 
 
 app = Flask(__name__)
@@ -42,6 +43,40 @@ MODEL_CATALOG = [
 def bac_log(message):
     if ENABLE_BAC_LOGS:
         print(message)
+
+
+def with_rag_context(messages, file_ids=None):
+    latest_user = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            latest_user = (msg.get("content") or "").strip()
+            break
+
+    hits = search_index(
+        latest_user,
+        index_file=RAG_INDEX_FILE,
+        top_k=RAG_TOP_K,
+        vector_dims=RAG_VECTOR_DIMS,
+        file_ids=file_ids,
+    )
+    if not hits:
+        return messages, []
+
+    snippets = []
+    for hit in hits:
+        snippet = (hit.get("text") or "")[:RAG_MAX_SNIPPET_CHARS]
+        snippets.append(
+            f"[doc:{hit['file_name']}#{hit['chunk_index']} score={hit['score']:.3f}]\n{snippet}"
+        )
+
+    grounding = (
+        "Use the document snippets below only when relevant. "
+        "If you use them, cite the snippet tag like [doc:file#chunk]. "
+        "If snippets are insufficient, say what is missing.\n\n"
+        + "\n\n".join(snippets)
+    )
+    enhanced = [{"role": "system", "content": grounding}] + list(messages)
+    return enhanced, hits
 
 
 @app.after_request
@@ -122,6 +157,11 @@ def bac_tool():
     bac_log(f"BAC: /bac_tool message length = {len(message)}")
     use_fallback = bool(data.get("use_fallback", True))
     bac_log(f"BAC: /bac_tool use_fallback = {use_fallback}")
+    file_ids = data.get("file_ids", []) or []
+    if not isinstance(file_ids, list):
+        return jsonify({"error": "file_ids must be a list"}), 400
+    file_ids = [str(item).strip() for item in file_ids if str(item).strip()]
+    bac_log(f"BAC: /bac_tool file_ids = {len(file_ids)}")
 
     if not message:
         return jsonify({"error": "Message is required"}), 400
@@ -136,7 +176,10 @@ def bac_tool():
     memory = save_message_and_get_memory(model, "user", message, MAX_CONTEXT_MESSAGES)
     bac_log(f"BAC: /bac_tool context size = {len(memory)} for model {model}")
 
-    response = run_model(model, memory, use_fallback=use_fallback)
+    model_messages, rag_hits = with_rag_context(memory, file_ids=file_ids)
+    bac_log(f"BAC: /bac_tool rag hits = {len(rag_hits)}")
+
+    response = run_model(model, model_messages, use_fallback=use_fallback)
     bac_log(f"BAC: /bac_tool response length = {len(response) if response else 0}")
 
     save_message(model, "assistant", response)
@@ -144,7 +187,9 @@ def bac_tool():
     bac_log("BAC: POST /bac_tool completed")
 
     return jsonify({
-        "response": response
+        "response": response,
+        "rag_hits": len(rag_hits),
+        "attached_files": len(file_ids),
     })
 
 
@@ -166,6 +211,11 @@ def compare():
     bac_log(f"BAC: /compare models = {models}")
     use_fallback = bool(data.get("use_fallback", True))
     bac_log(f"BAC: /compare use_fallback = {use_fallback}")
+    file_ids = data.get("file_ids", []) or []
+    if not isinstance(file_ids, list):
+        return jsonify({"error": "file_ids must be a list"}), 400
+    file_ids = [str(item).strip() for item in file_ids if str(item).strip()]
+    bac_log(f"BAC: /compare file_ids = {len(file_ids)}")
 
     if not message:
         bac_log("BAC: /compare validation failed: empty message")
@@ -188,7 +238,7 @@ def compare():
     if workers == 1:
         for model in models:
             try:
-                result[model] = compare_one_model(model, message, use_fallback=use_fallback)
+                result[model] = compare_one_model(model, message, use_fallback=use_fallback, file_ids=file_ids)
                 bac_log(f"BAC: /compare completed model {model}")
             except Exception as exc:
                 bac_log(f"BAC: /compare error for model {model}: {exc}")
@@ -196,7 +246,7 @@ def compare():
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(compare_one_model, model, message, use_fallback): model
+                executor.submit(compare_one_model, model, message, use_fallback, file_ids): model
                 for model in models
             }
 
@@ -232,11 +282,45 @@ def upload():
 
     )
 
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     file.save(path)
     bac_log(f"BAC: /upload saved file to {path}")
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    if ext in image_exts:
+        doc_record = {
+            "file_id": "",
+            "name": file.filename,
+            "path": path,
+            "size_bytes": os.path.getsize(path) if os.path.exists(path) else 0,
+            "chunk_count": 0,
+            "kind": "image",
+            "note": "Image uploaded. Image grounding is not enabled yet for this route.",
+        }
+        bac_log(f"BAC: /upload stored image file {doc_record['name']}")
+    else:
+        doc_record = index_document_file(
+            path,
+            index_file=RAG_INDEX_FILE,
+            vector_dims=RAG_VECTOR_DIMS,
+            chunk_size=RAG_CHUNK_SIZE,
+            chunk_overlap=RAG_CHUNK_OVERLAP,
+        )
+        doc_record["kind"] = "document"
+        bac_log(f"BAC: /upload indexed file {doc_record['name']} chunks={doc_record['chunk_count']}")
     bac_log("BAC: POST /upload completed")
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "document": doc_record})
+
+
+@app.route("/documents", methods=["GET"])
+def documents():
+    docs = list_documents(RAG_INDEX_FILE)
+    return jsonify({
+        "count": len(docs),
+        "documents": docs
+    })
 
 
 # -------------------------
@@ -328,11 +412,13 @@ def run_model(model, messages, use_fallback=True):
         raise ValueError(f"Unsupported model: {model}.")
 
 
-def compare_one_model(model, message, use_fallback=True):
+def compare_one_model(model, message, use_fallback=True, file_ids=None):
     bac_log(f"BAC: /compare processing model {model}")
     memory = save_message_and_get_memory(model, "user", message, MAX_CONTEXT_MESSAGES)
     bac_log(f"BAC: /compare context size = {len(memory)} for model {model}")
-    answer = run_model(model, memory, use_fallback=use_fallback)
+    model_messages, rag_hits = with_rag_context(memory, file_ids=file_ids)
+    bac_log(f"BAC: /compare rag hits = {len(rag_hits)} for model {model}")
+    answer = run_model(model, model_messages, use_fallback=use_fallback)
     save_message(model, "assistant", answer)
     return answer
 

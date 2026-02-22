@@ -2,6 +2,7 @@
 <html>
 
 <head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
 <link rel="stylesheet" href="/static/style.css">
 
@@ -9,26 +10,68 @@
 
 <body>
 
-<h2>LLMs comparison tool and router</h2>
+<main class="app-shell">
+<aside class="side-rail">
+<div class="brand">LLMs Router</div>
+<h1>LLMs comparison tool and router</h1>
+<p class="subtitle">Attach files, switch single or multiple mode, and run grounded prompts in one workspace.</p>
+<div class="rail-card">
+<div class="rail-label">Status</div>
+<div id="uploadStatus" class="upload-status">Optional: choose files/images from the + menu, then send.</div>
+<div id="documentsInfo" class="documents-info"></div>
+</div>
+</aside>
 
-<input id="msg">
-
-<select id="bacToolModel"></select>
-
-<button onclick="runBacTool()">SINGLE_LLM</button>
-
-<button onclick="multipleLlms()">Multiple LLMs</button>
-
-<label style="margin-left:10px;">
-<input type="checkbox" id="useFallback" checked>
-Use fallback
-</label>
-
-<div id="compareModels" class="models-panel"></div>
-
-<input type="file" id="file">
-
+<section class="workspace">
+<div class="output-wrap">
+<div class="section-title">Output</div>
 <div id="output" class="output-area"></div>
+</div>
+
+<div class="composer">
+<label for="msg" class="field-label">Prompt</label>
+<textarea id="msg" rows="4" placeholder="Ask something about your attached files..."></textarea>
+
+<input type="file" id="file" accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp,.gif" multiple>
+
+<div class="composer-controls">
+<div class="left-controls">
+<button type="button" id="toolsBtn" class="tools-btn" onclick="toggleToolsMenu()">+</button>
+<div id="toolsMenu" class="tools-menu hidden">
+<button type="button" onclick="onSelectAddFiles()">Add files or images</button>
+</div>
+</div>
+<div class="mode-toggle" role="group" aria-label="Run mode">
+<button type="button" id="singleModeBtn" onclick="onSelectSingleMode()">Single</button>
+<button type="button" id="multipleModeBtn" onclick="onSelectMultipleMode()">Multiple</button>
+</div>
+<div id="modeSummary" class="mode-summary">Single model</div>
+<button id="sendBtn" onclick="submitPrompt()">Send</button>
+</div>
+
+<div id="fileChips" class="file-chips"></div>
+<div id="singleModelPanel" class="floating-panel">
+<label for="bacToolModel" class="field-label">Single model</label>
+<select id="bacToolModel"></select>
+</div>
+
+<label class="toggle-row">
+<input type="checkbox" id="useFallback" checked>
+<span>Use fallback</span>
+</label>
+</div>
+</section>
+</main>
+
+<div id="multiModelModal" class="modal-backdrop hidden">
+<div class="modal-card">
+<div class="modal-title">Select models for Multiple mode</div>
+<div id="compareModels" class="models-panel"></div>
+<div class="modal-actions">
+<button type="button" onclick="closeMultiModelModal()">Done</button>
+</div>
+</div>
+</div>
 
 <script src="/static/script.js"></script>
 
