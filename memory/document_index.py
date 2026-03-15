@@ -49,25 +49,135 @@ def _safe_read_text(path):
 def _safe_read_pdf(path):
     try:
         from pypdf import PdfReader
-    except ImportError as exc:
-        raise ValueError("PDF parsing requires pypdf. Install with: pip install pypdf") from exc
+    except ImportError:
+        # Graceful degradation if pypdf not installed
+        return ""
 
-    reader = PdfReader(path)
-    parts = []
-    for page in reader.pages:
-        page_text = page.extract_text() or ""
-        if page_text:
-            parts.append(page_text)
-    return "\n".join(parts)
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            if page_text:
+                parts.append(page_text)
+        return "\n".join(parts)
+    except Exception:
+        return ""
 
 
-def _parse_file(path):
+
+def _safe_read_image(path):
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+    try:
+        import pytesseract
+    except ImportError:
+        return ""
+
+    try:
+        with Image.open(path) as img:
+            text = pytesseract.image_to_string(img)
+        return text
+    except Exception:
+        return ""
+
+
+
+def _safe_read_pptx(path):
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return ""
+
+    try:
+        prs = Presentation(path)
+        parts = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    parts.append(shape.text)
+        return "\n".join([p for p in parts if p])
+    except Exception:
+        return ""
+
+
+def _safe_read_docx(path):
+    try:
+        import docx
+    except ImportError:
+        return ""
+
+    try:
+        doc = docx.Document(path)
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n".join(paragraphs)
+    except Exception:
+        return ""
+
+
+def _safe_read_video(path):
+    try:
+        from moviepy.editor import VideoFileClip
+    except ImportError:
+        return ""
+
+    clip = None
+    try:
+        clip = VideoFileClip(path)
+        audio = clip.audio
+        if audio is None:
+            return ""
+
+        import tempfile
+        tmp_wav = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_wav = tmp.name
+            audio.write_audiofile(tmp_wav, verbose=False, logger=None)
+
+            try:
+                import whisper
+            except ImportError:
+                return ""
+
+            model = whisper.load_model("small")
+            result = model.transcribe(tmp_wav)
+            return result.get("text", "")
+        finally:
+            if tmp_wav and os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+    except Exception:
+        return ""
+    finally:
+        if clip:
+            clip.close()
+
+
+def parse_file(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css"}:
         return _safe_read_text(path)
     if ext == ".pdf":
         return _safe_read_pdf(path)
-    raise ValueError(f"Unsupported file type: {ext}. Supported: .txt, .md, .pdf")
+    if ext in {".pptx", ".ppt"}:
+        text = _safe_read_pptx(path)
+        if text:
+            return text
+        return _safe_read_text(path)
+    if ext == ".docx":
+        text = _safe_read_docx(path)
+        if text:
+            return text
+        return _safe_read_text(path)
+    if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}:
+        return _safe_read_image(path)
+    if ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
+        return _safe_read_video(path)
+    raise ValueError(f"Unsupported file type: {ext}. Supported: .txt, .md, .pdf, .docx, .pptx, images, videos")
+
+_parse_file = parse_file
 
 
 def _chunk_text(text, chunk_size=900, overlap=120):
@@ -126,6 +236,7 @@ def index_file(path, index_file, vector_dims=192, chunk_size=900, chunk_overlap=
         "uploaded_at": _now_iso(),
         "size_bytes": os.path.getsize(path) if os.path.exists(path) else 0,
         "chunk_count": len(chunks),
+        "text_excerpt": (text or "")[:1200],
     }
 
     with INDEX_LOCK:

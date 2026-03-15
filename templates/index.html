@@ -19,6 +19,13 @@
 <div class="rail-label">Status</div>
 <div id="uploadStatus" class="upload-status">Optional: choose files/images from the + menu, then send.</div>
 <div id="documentsInfo" class="documents-info"></div>
+<div id="readFilePanel" class="read-file-panel">
+  <div class="field-label">Upload or select indexed doc: Read File Text + Analyze</div>
+  <input type="text" id="documentInput" placeholder="Enter document ID to read from index (optional)" style="width:100%; margin-bottom:6px;" />
+  <button type="button" id="readFileBtn">Read File Text</button>
+  <div class="hint" style="margin-top:6px;">Will read indexed document if doc ID is present, else it analyzes uploaded files (selected in left file-input)</div>
+</div>
+<div id="analyzeFilePanel" class="read-file-panel" style="margin-top: 12px; display:none;">
 </div>
 </aside>
 
@@ -32,7 +39,13 @@
 <label for="msg" class="field-label">Prompt</label>
 <textarea id="msg" rows="4" placeholder="Ask something about your attached files..."></textarea>
 
-<input type="file" id="file" accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp,.gif" multiple>
+<input type="file" id="file" accept=".txt,.md,.pdf,.docx,.pptx,.ppt,.doc,.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.avi,.mkv,.webm" multiple>
+
+<div class="field-label">Add link</div>
+<div class="link-control">
+  <input type="url" id="urlInput" placeholder="https://example.com/article" />
+  <button type="button" id="addLinkBtn" onclick="addLink()">Add link</button>
+</div>
 
 <div class="composer-controls">
 <div class="left-controls">
@@ -46,6 +59,14 @@
 <button type="button" id="multipleModeBtn" onclick="onSelectMultipleMode()">Multiple</button>
 </div>
 <div id="modeSummary" class="mode-summary">Single model</div>
+<div class="output-type-row">
+	<label for="outputType" class="field-label">Output Type</label>
+	<select id="outputType">
+		<option value="video">Video</option>
+		<option value="pdf">PDF</option>
+		<option value="ppt">PPT</option>
+	</select>
+</div>
 <button id="sendBtn" onclick="submitPrompt()">Send</button>
 </div>
 

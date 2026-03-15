@@ -149,7 +149,8 @@ button {
 }
 
 #msg,
-#bacToolModel {
+#bacToolModel,
+#outputType {
   width: 100%;
   border: 1px solid var(--line);
   background: #fff;
@@ -165,7 +166,8 @@ button {
 }
 
 #msg:focus,
-#bacToolModel:focus {
+#bacToolModel:focus,
+#outputType:focus {
   outline: none;
   border-color: #7ea6cf;
   box-shadow: 0 0 0 3px rgba(20, 100, 179, 0.18);
@@ -173,6 +175,36 @@ button {
 
 #file {
   display: none;
+}
+
+.link-control {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+  align-items: center;
+}
+
+#urlInput {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+#addLinkBtn {
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  min-width: 80px;
+  height: 36px;
+}
+
+#addLinkBtn:hover {
+  background: var(--accent-strong);
 }
 
 .composer-controls {
@@ -358,6 +390,24 @@ button:disabled {
   border-radius: 999px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.read-file-panel {
+  margin-top: 10px;
+}
+
+#readFileBtn {
+  width: 100%;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  height: 34px;
+}
+
+#readFileBtn:hover {
+  background: var(--accent-strong);
 }
 
 .badge-remote {
