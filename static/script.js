@@ -516,6 +516,35 @@ async function readLocalFile(file){
   })
 }
 
+function isImageFile(file){
+  if(!file) return false
+  const name=(file.name||"").toLowerCase()
+  const type=(file.type||"").toLowerCase()
+  return type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff)$/.test(name)
+}
+
+async function extractOcrHints(files, output){
+  const hints=Array(files.length).fill("")
+  const imageIndexes=[]
+  for(let i=0;i<files.length;i++){
+    if(isImageFile(files[i])) imageIndexes.push(i)
+  }
+  if(imageIndexes.length===0) return hints
+  if(typeof Tesseract === "undefined") return hints
+
+  for(let i=0;i<imageIndexes.length;i++){
+    const idx=imageIndexes[i]
+    output.textContent=`Running OCR on image ${i+1}/${imageIndexes.length}...`
+    try{
+      const result=await Tesseract.recognize(files[idx], "eng")
+      hints[idx]=((result && result.data && result.data.text) || "").trim()
+    }catch{
+      hints[idx]=""
+    }
+  }
+  return hints
+}
+
 async function readDocument(){
   const output=document.getElementById("output")
   const documentInput=document.getElementById("documentInput")
@@ -541,6 +570,8 @@ async function readDocument(){
       return
     }
 
+    const ocrHints=await extractOcrHints(attachedFiles, output)
+
     // Upload selected files first to the index (one-by-one) for persistence.
     for(const file of attachedFiles){
       const formData=new FormData()
@@ -554,8 +585,9 @@ async function readDocument(){
 
     // Now run analysis across all selected files in one request.
     const analysisForm = new FormData()
-    for(const file of attachedFiles){
-      analysisForm.append("file", file)
+    for(let i=0;i<attachedFiles.length;i++){
+      analysisForm.append("file", attachedFiles[i])
+      analysisForm.append("ocr_text", ocrHints[i] || "")
     }
 
     const analyzeRes = await fetch("/analyze_file", {method:"POST", body: analysisForm})

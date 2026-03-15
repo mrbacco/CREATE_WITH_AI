@@ -1,6 +1,6 @@
-# LLM Router (Flask)
+# CREATE_WITH_AI (Flask)
 
-LLM Router is a Flask web app for:
+CREATE_WITH_AI is a Flask web app for:
 
 - Single-model chat
 - Multi-model side-by-side comparison
@@ -44,7 +44,9 @@ Only models with configured keys are exposed in the UI.
 ## File analysis behavior
 
 - Text-like files are parsed and analyzed with local text statistics.
-- Images (.png, .jpg, .jpeg, .webp, .gif, .bmp, .tiff) are analyzed with Gemini vision via analyze_image.
+- Images (.png, .jpg, .jpeg, .webp, .gif, .bmp, .tiff) are analyzed locally on the app server via Pillow-based heuristics.
+- Browser-side OCR is performed with Tesseract.js and sent to the backend as OCR hints during Read File Text analysis.
+- OCR text extraction is attempted locally with pytesseract (requires Tesseract OCR installed on the host OS).
 - The Read File Text button now prioritizes selected files over document ID lookup.
 - If no file is selected, an optional document ID can analyze an already-indexed record.
 
@@ -112,6 +114,18 @@ pip install -r requirements.txt
 python .\app.py
 ```
 
+Alternative launcher:
+
+```powershell
+python .\run.py
+```
+
+Force start (kills existing process bound to port first):
+
+```powershell
+python .\run.py --force
+```
+
 5. Open:
 
 ```text
@@ -134,7 +148,7 @@ OLLAMA_API_KEY=""
 
 OLLAMA_CLOUD_BASE_URL="https://ollama.com"
 OPENROUTER_SITE_URL="http://localhost:5050"
-OPENROUTER_APP_NAME="LLMs comparison tool and router"
+OPENROUTER_APP_NAME="CREATE_WITH_AI"
 
 UPLOAD_FOLDER="uploads"
 RAG_INDEX_FILE="data/rag_index.json"

@@ -516,58 +516,141 @@ def analyze_text_content(text):
     }
 
 
-def analyze_image(path):
-    import base64
+def analyze_image(path, ocr_hint=""):
+    try:
+        from PIL import Image, ImageStat
+    except ImportError:
+        return {
+            "error": "Pillow is not installed",
+            "analytical_description": "Image analysis unavailable because Pillow is not installed on the server.",
+            "description": "Image analysis unavailable because Pillow is not installed on the server.",
+        }
 
-    ext = os.path.splitext(path)[1].lower()
-    mime_types = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-        ".tiff": "image/tiff",
-        ".gif": "image/gif"
-    }
-    mime_type = mime_types.get(ext, "image/jpeg")
-
-    with open(path, "rb") as f:
-        image_data = base64.b64encode(f.read()).decode("utf-8")
-
-    if not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY not set"}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={urllib.parse.quote(GEMINI_API_KEY, safe='')}"
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": "Describe this image in detail, including any text visible in the image."},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": image_data
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    def color_name(rgb):
+        r, g, b = rgb
+        if r < 35 and g < 35 and b < 35:
+            return "black"
+        if r > 220 and g > 220 and b > 220:
+            return "white"
+        if abs(r - g) < 15 and abs(g - b) < 15:
+            return "gray"
+        if r >= g and r >= b:
+            if g > 110 and b < 90:
+                return "yellow-orange"
+            return "red"
+        if g >= r and g >= b:
+            return "green"
+        return "blue"
 
     try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        description = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        with Image.open(path) as img:
+            width, height = img.size
+            img_format = (img.format or "unknown").upper()
+            mode = img.mode
+
+            orientation = "square"
+            if width > height:
+                orientation = "landscape"
+            elif height > width:
+                orientation = "portrait"
+
+            rgb = img.convert("RGB")
+            sample = rgb.resize((120, 120))
+            stat = ImageStat.Stat(sample)
+            mean_r, mean_g, mean_b = stat.mean
+            brightness = 0.2126 * mean_r + 0.7152 * mean_g + 0.0722 * mean_b
+            contrast = sum(stat.stddev) / 3.0
+
+            if brightness < 70:
+                light_label = "dark"
+            elif brightness > 180:
+                light_label = "bright"
+            else:
+                light_label = "balanced lighting"
+
+            if contrast < 25:
+                contrast_label = "low contrast"
+            elif contrast > 55:
+                contrast_label = "high contrast"
+            else:
+                contrast_label = "medium contrast"
+
+            quant = sample.convert("P", palette=Image.ADAPTIVE, colors=5)
+            palette = quant.getpalette() or []
+            color_counts = quant.getcolors() or []
+            color_counts = sorted(color_counts, key=lambda item: item[0], reverse=True)
+
+            dominant_colors = []
+            for _, idx in color_counts[:4]:
+                base = int(idx) * 3
+                if base + 2 < len(palette):
+                    rgb_triplet = (palette[base], palette[base + 1], palette[base + 2])
+                    dominant_colors.append(color_name(rgb_triplet))
+
+            # Preserve order but remove duplicates.
+            seen = set()
+            dominant_colors = [c for c in dominant_colors if not (c in seen or seen.add(c))]
+
+            visible_text = (ocr_hint or "").strip()
+            if visible_text:
+                ocr_status = "OCR provided by frontend (Tesseract.js)"
+            else:
+                ocr_status = "OCR not attempted"
+                try:
+                    import pytesseract
+                    visible_text = (pytesseract.image_to_string(rgb) or "").strip()
+                    ocr_status = "OCR attempted via pytesseract"
+                except ImportError:
+                    ocr_status = "OCR unavailable (pytesseract not installed)"
+                except Exception as exc:
+                    ocr_status = f"OCR failed: {exc}"
+
+            brief_description = (
+                f"{orientation.title()} {img_format} image ({width}x{height}) with {light_label} and {contrast_label}."
+            )
+
+            color_text = ", ".join(dominant_colors) if dominant_colors else "mixed tones"
+            detailed_description = (
+                f"The image is {orientation} in orientation, rendered in {mode} mode, with dominant colors around {color_text}. "
+                f"Overall appearance suggests {light_label} and {contrast_label}."
+            )
+            if visible_text:
+                detailed_description += f" Detected text: {visible_text[:600]}"
+
+            uncertainty = (
+                "This is a heuristic local analysis (metadata, color, tone, and optional OCR) and does not perform semantic object recognition."
+            )
+
+            confidence = 0.55 if visible_text else 0.45
+
+            return {
+                "analytical_description": detailed_description,
+                "description": detailed_description,
+                "brief_description": brief_description,
+                "detailed_description": detailed_description,
+                "scene": "not inferred by local heuristic analyzer",
+                "objects": [],
+                "actions": [],
+                "people": [],
+                "visible_text": visible_text,
+                "style_and_mood": f"{light_label}, {contrast_label}",
+                "safety_notes": "No remote AI service used for this analysis.",
+                "uncertainty": uncertainty,
+                "confidence": confidence,
+                "analysis_method": "local_server_heuristics",
+                "ocr_status": ocr_status,
+                "width": width,
+                "height": height,
+                "format": img_format,
+                "mode": mode,
+                "dominant_colors": dominant_colors,
+            }
+    except Exception as exc:
         return {
-            "analytical_description": description,
-            "description": description,
+            "error": str(exc),
+            "analytical_description": f"Error analyzing image locally: {exc}",
+            "description": f"Error analyzing image locally: {exc}",
         }
-    except Exception as e:
-        return {"error": str(e), "analytical_description": f"Error analyzing image: {str(e)}"}
 
 
 @app.route("/documents", methods=["GET"])
@@ -608,10 +691,11 @@ def analyze_file():
     files = request.files.getlist("file")
     if not files:
         return jsonify({"error": "No file uploaded"}), 400
+    ocr_hints = request.form.getlist("ocr_text")
 
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
     results = []
-    for file in files:
+    for index, file in enumerate(files):
         filename = file.filename or f"uploaded_{uuid.uuid4()}"
         unique_name = f"{uuid.uuid4()}_{filename}"
         save_path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
@@ -620,9 +704,10 @@ def analyze_file():
 
         ext = os.path.splitext(save_path)[1].lower()
 
-        # Handle images directly with Gemini vision — skip text indexing.
+        # Handle images directly with local analysis — skip text indexing.
         if ext in image_exts:
-            analysis = analyze_image(save_path)
+            hint = ocr_hints[index] if index < len(ocr_hints) else ""
+            analysis = analyze_image(save_path, ocr_hint=hint)
             results.append({"filename": filename, "analysis": analysis})
             continue
 
@@ -652,8 +737,11 @@ def analyze_file():
     if results:
         file_summaries = []
         for item in results:
-            if item.get("analysis"):
-                file_summaries.append(f"{item['filename']} -> {item['analysis']['analytical_description']}")
+            analysis = item.get("analysis") or {}
+            if isinstance(analysis, dict):
+                desc = analysis.get("analytical_description") or analysis.get("description") or analysis.get("error")
+                if desc:
+                    file_summaries.append(f"{item['filename']} -> {desc}")
         overall_description = "\n---\n".join(file_summaries)
 
     return jsonify({"status": "ok", "files": results, "overall_analysis": overall_description})
@@ -825,5 +913,11 @@ def choose_default_model(enabled_models):
 
 if __name__ == "__main__":
     bac_log(f"BAC: starting Flask app on port 5050 with debug={APP_DEBUG}")
-
-    app.run(debug=APP_DEBUG, port=5050)
+    try:
+        app.run(debug=APP_DEBUG, port=5050)
+    except OSError as exc:
+        # Provide a clear, user-friendly message when a previous process owns the port.
+        if getattr(exc, "errno", None) in {48, 98, 10013, 10048}:
+            print("ERROR: Port 5050 is already in use.")
+            print("Stop the running process first, or run: python run.py --force")
+        raise
