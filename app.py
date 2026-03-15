@@ -7,16 +7,20 @@ Feb 21, 2026
 
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
 import os
 import urllib.parse
 import json
 import re
 import uuid
+import sqlite3
+import subprocess
+import shutil
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from werkzeug.exceptions import HTTPException
+import ollama
 
 from config import *
 from llm.gemini_client import gemini_bac_tool
@@ -32,6 +36,9 @@ app = Flask(__name__)
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+VIDEO_DB_FILE = os.getenv("VIDEO_DB_FILE", os.path.join("data", "video_analysis.db"))
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+_WHISPER_MODEL = None
 MODEL_CATALOG = [
     {"id": "gemini-2.0-flash", "provider": "gemini", "type": "remote", "key_name": "GEMINI_API_KEY"},
     {"id": "gemini-2.0-flash-lite", "provider": "gemini", "type": "remote", "key_name": "GEMINI_API_KEY"},
@@ -58,6 +65,362 @@ def bac_log_major(message):
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _is_under_uploads(path):
+    uploads_root = os.path.abspath(app.config["UPLOAD_FOLDER"])
+    target = os.path.abspath(path or "")
+    return bool(target) and target.startswith(uploads_root)
+
+
+def ensure_video_db():
+    os.makedirs(os.path.dirname(VIDEO_DB_FILE), exist_ok=True)
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS video_analyses (
+                analysis_id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                transcript TEXT,
+                summary TEXT,
+                keyframes_json TEXT,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def extract_audio_ffmpeg(video_path, audio_path):
+    bac_log(f"BAC: extract_audio_ffmpeg start video={video_path} audio={audio_path}")
+    ffmpeg_exe = os.getenv("FFMPEG_PATH", "").strip() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        try:
+            import importlib
+            imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_exe = ""
+
+    if not ffmpeg_exe:
+        raise RuntimeError(
+            "ffmpeg executable not found. Install ffmpeg or set FFMPEG_PATH environment variable."
+        )
+
+    bac_log(f"BAC: extract_audio_ffmpeg using ffmpeg={ffmpeg_exe}")
+
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-i",
+        video_path,
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        audio_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"ffmpeg executable was not found: {ffmpeg_exe}") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    bac_log("BAC: extract_audio_ffmpeg completed successfully")
+
+
+def transcribe_audio_whisper(audio_path):
+    global _WHISPER_MODEL
+    import wave
+    import numpy as np
+
+    bac_log(f"BAC: transcribe_audio_whisper start audio={audio_path}")
+
+    try:
+        import whisper
+    except ImportError as exc:
+        raise RuntimeError("whisper is not installed") from exc
+
+    if _WHISPER_MODEL is None:
+        bac_log("BAC: transcribe_audio_whisper loading Whisper model=base")
+        _WHISPER_MODEL = whisper.load_model("base")
+
+    try:
+        with wave.open(audio_path, "rb") as wf:
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            sample_rate = wf.getframerate()
+            frame_count = wf.getnframes()
+            raw = wf.readframes(frame_count)
+    except Exception as exc:
+        raise RuntimeError(f"failed to load wav audio: {exc}") from exc
+
+    if sample_width != 2:
+        raise RuntimeError(f"unsupported wav sample width: {sample_width}")
+
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+
+    if sample_rate != 16000:
+        raise RuntimeError(f"unexpected sample rate {sample_rate}; expected 16000")
+
+    bac_log(
+        f"BAC: transcribe_audio_whisper audio props channels={channels} sample_width={sample_width} sample_rate={sample_rate} samples={audio.size}"
+    )
+
+    if audio.size == 0:
+        return "No audio samples were extracted from this video."
+
+    # Normalize low-volume tracks to improve transcription reliability.
+    peak = float(np.max(np.abs(audio)))
+    if peak > 0:
+        audio = (audio / peak) * 0.95
+
+    language_hint = os.getenv("WHISPER_LANGUAGE", "").strip().lower() or None
+
+    attempts = [
+        {
+            "task": "transcribe",
+            "fp16": False,
+            "temperature": 0,
+            "condition_on_previous_text": False,
+        },
+        {
+            "task": "transcribe",
+            "fp16": False,
+            "temperature": 0.2,
+            "condition_on_previous_text": False,
+            "initial_prompt": "Transcribe any spoken words exactly as heard.",
+        },
+    ]
+
+    if language_hint:
+        for params in attempts:
+            params["language"] = language_hint
+
+    last_error = None
+    for attempt_index, params in enumerate(attempts, start=1):
+        bac_log(f"BAC: transcribe_audio_whisper attempt={attempt_index} language={params.get('language', 'auto')}")
+        try:
+            result = _WHISPER_MODEL.transcribe(audio, **params)
+            text = (result.get("text") or "").strip()
+            if not text:
+                segments = result.get("segments") or []
+                text = " ".join((seg.get("text") or "").strip() for seg in segments).strip()
+            if text:
+                bac_log(f"BAC: transcribe_audio_whisper success chars={len(text)} attempt={attempt_index}")
+                return text
+        except Exception as exc:
+            last_error = exc
+            bac_log(f"BAC: transcribe_audio_whisper attempt={attempt_index} failed: {exc}")
+
+    duration_seconds = round(float(audio.size) / float(sample_rate), 2)
+    if last_error is not None:
+        return f"Whisper could not produce a transcript. Duration: {duration_seconds}s. Error: {last_error}"
+    return f"No speech detected by Whisper. Duration: {duration_seconds}s."
+
+
+def extract_keyframes(video_path, output_dir, interval_seconds=3):
+    bac_log(f"BAC: extract_keyframes start video={video_path} output_dir={output_dir} interval={interval_seconds}s")
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("opencv-python is not installed") from exc
+
+    os.makedirs(output_dir, exist_ok=True)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError("could not open video file for keyframe extraction")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    effective_fps = fps if fps > 0 else 1.0
+    frame_interval = max(1, int(effective_fps * interval_seconds))
+
+    keyframes = []
+    frame_index = 0
+    extracted = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if frame_index % frame_interval == 0:
+            timestamp = round(frame_index / effective_fps, 2)
+            out_name = f"keyframe_{extracted:04d}.jpg"
+            out_path = os.path.join(output_dir, out_name)
+            cv2.imwrite(out_path, frame)
+            keyframes.append({
+                "index": extracted,
+                "timestamp_seconds": timestamp,
+                "path": out_path,
+            })
+            extracted += 1
+        frame_index += 1
+
+    cap.release()
+    bac_log(f"BAC: extract_keyframes completed count={len(keyframes)}")
+    return keyframes
+
+
+def summarize_transcript_with_ollama(transcript):
+    transcript = (transcript or "").strip()
+    if not transcript:
+        bac_log("BAC: summarize_transcript_with_ollama skipped because transcript is empty")
+        return "No speech transcript detected in audio."
+
+    def local_summary_fallback(text, reason=""):
+        clean = re.sub(r"\s+", " ", text).strip()
+        if not clean:
+            return "No speech transcript detected in audio."
+        segments = re.split(r"(?<=[.!?])\s+", clean)
+        top_points = [s.strip() for s in segments if s.strip()][:4]
+        snippet = "\n".join(f"- {point}" for point in top_points) if top_points else "- (no clear sentence boundaries)"
+        note = f"\n\nNote: Ollama was unavailable ({reason}). Generated local transcript summary." if reason else ""
+        return (
+            "Main Topic\n"
+            f"{clean[:220]}\n\n"
+            "Key Moments\n"
+            f"{snippet}\n\n"
+            "Entities Mentioned\n"
+            "- (heuristic mode does not perform entity extraction)\n\n"
+            "Final Summary\n"
+            f"{clean[:600]}"
+            f"{note}"
+        )
+
+    prompt = (
+        "Summarize this video transcript offline in a concise and structured way. "
+        "Return 4 sections: Main Topic, Key Moments, Entities Mentioned, and Final Summary.\n\n"
+        f"Transcript:\n{transcript[:12000]}"
+    )
+
+    try:
+        bac_log(f"BAC: summarize_transcript_with_ollama calling model={OLLAMA_DEFAULT_MODEL} chars={len(transcript)}")
+        response = ollama.chat(
+            model=OLLAMA_DEFAULT_MODEL,
+            messages=[
+                {"role": "system", "content": "You create factual summaries from transcripts."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        content = (response.get("message") or {}).get("content", "").strip()
+        bac_log(f"BAC: summarize_transcript_with_ollama completed chars={len(content)}")
+        return content or local_summary_fallback(transcript, reason="empty response")
+    except Exception as exc:
+        bac_log(f"BAC: summarize_transcript_with_ollama fallback used because: {exc}")
+        return local_summary_fallback(transcript, reason=str(exc))
+
+
+def store_video_analysis(record):
+    bac_log(f"BAC: store_video_analysis start analysis_id={record.get('analysis_id')} filename={record.get('filename')}")
+    ensure_video_db()
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    try:
+        # Keep only the latest analysis per filename to avoid repeated list growth.
+        conn.execute("DELETE FROM video_analyses WHERE filename = ?", (record["filename"],))
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO video_analyses
+            (analysis_id, filename, file_path, transcript, summary, keyframes_json, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["analysis_id"],
+                record["filename"],
+                record["file_path"],
+                record.get("transcript", ""),
+                record.get("summary", ""),
+                json.dumps(record.get("keyframes", []), ensure_ascii=False),
+                json.dumps(record.get("metadata", {}), ensure_ascii=False),
+                record.get("created_at", _now_iso()),
+            ),
+        )
+        conn.commit()
+        bac_log(f"BAC: store_video_analysis committed analysis_id={record.get('analysis_id')}")
+    finally:
+        conn.close()
+
+
+def analyze_video_offline(video_path, filename):
+    bac_log_major(f"BAC: analyze_video_offline started filename={filename}")
+    analysis_id = str(uuid.uuid4())
+    created_at = _now_iso()
+    work_dir = os.path.join(app.config["UPLOAD_FOLDER"], "video_work", analysis_id)
+    keyframe_dir = os.path.join(work_dir, "keyframes")
+    audio_path = os.path.join(work_dir, "audio.wav")
+    transcript_path = os.path.join(work_dir, "transcript.txt")
+    os.makedirs(work_dir, exist_ok=True)
+
+    try:
+        bac_log(f"BAC: analyze_video_offline [{analysis_id}] extracting audio")
+        extract_audio_ffmpeg(video_path, audio_path)
+        bac_log(f"BAC: analyze_video_offline [{analysis_id}] transcribing audio")
+        transcript = transcribe_audio_whisper(audio_path)
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write(transcript or "")
+        bac_log(f"BAC: analyze_video_offline [{analysis_id}] transcript saved to {transcript_path}")
+        bac_log(f"BAC: analyze_video_offline [{analysis_id}] summarizing transcript")
+        summary = summarize_transcript_with_ollama(transcript)
+        bac_log(f"BAC: analyze_video_offline [{analysis_id}] extracting keyframes")
+        keyframes = extract_keyframes(video_path, keyframe_dir, interval_seconds=3)
+
+        record = {
+            "analysis_id": analysis_id,
+            "filename": filename,
+            "file_path": video_path,
+            "transcript": transcript,
+            "summary": summary,
+            "keyframes": keyframes,
+            "metadata": {
+                "pipeline": ["ffmpeg_audio", "whisper_transcription", "opencv_keyframes", "ollama_summary"],
+                "keyframe_count": len(keyframes),
+                "offline": True,
+                "transcript_path": transcript_path,
+                "keyframes_dir": keyframe_dir,
+            },
+            "created_at": created_at,
+        }
+        store_video_analysis(record)
+        bac_log_major(f"BAC: analyze_video_offline completed analysis_id={analysis_id} keyframes={len(keyframes)} transcript_chars={len(transcript)}")
+
+        return {
+            "analysis_id": analysis_id,
+            "filename": filename,
+            "transcript": transcript,
+            "summary": summary,
+            "keyframes": keyframes,
+            "created_at": created_at,
+            "analysis_method": "offline_video_pipeline",
+            "analytical_description": (
+                f"Offline video analysis completed. Extracted {len(keyframes)} keyframes, generated transcript, "
+                "and summarized content with local Ollama."
+            ),
+        }
+    except Exception as exc:
+        bac_log(f"BAC: analyze_video_offline failed analysis_id={analysis_id}: {exc}")
+        return {
+            "analysis_id": analysis_id,
+            "filename": filename,
+            "error": str(exc),
+            "analysis_method": "offline_video_pipeline",
+            "analytical_description": f"Offline video analysis failed: {exc}",
+            "created_at": created_at,
+        }
+    finally:
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
 
 
 def with_rag_context(messages, file_ids=None):
@@ -366,8 +729,9 @@ def upload():
 
     ext = os.path.splitext(file.filename or "")[1].lower()
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
-    if ext in image_exts:
-        # Images are stored for later vision analysis; no text indexing needed.
+    if ext in image_exts or ext in VIDEO_EXTS:
+        # Images/videos are stored for later local analysis; no text indexing needed.
+        kind = "image" if ext in image_exts else "video"
         doc_record = {
             "file_id": str(uuid.uuid4()),
             "name": file.filename,
@@ -376,11 +740,11 @@ def upload():
             "size_bytes": os.path.getsize(path) if os.path.exists(path) else 0,
             "chunk_count": 0,
             "text_excerpt": "",
-            "kind": "image",
+            "kind": kind,
         }
-        bac_log(f"BAC: /upload stored image {file.filename}")
+        bac_log(f"BAC: /upload stored {kind} {file.filename}")
         bac_log("BAC: POST /upload completed")
-        bac_log_major(f"BAC: /upload completed image={file.filename} doc_id={doc_record.get('file_id')}")
+        bac_log_major(f"BAC: /upload completed {kind}={file.filename} doc_id={doc_record.get('file_id')}")
         return jsonify({"status": "ok", "document": doc_record})
 
     try:
@@ -662,10 +1026,171 @@ def documents():
     })
 
 
+@app.route("/video_analyses", methods=["GET"])
+def video_analyses():
+    ensure_video_db()
+    limit = max(1, min(int(request.args.get("limit", "50")), 500))
+    bac_log(f"BAC: GET /video_analyses limit={limit}")
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT analysis_id, filename, file_path, transcript, summary, keyframes_json, metadata_json, created_at
+            FROM video_analyses
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items = []
+    for row in rows:
+        metadata = json.loads(row["metadata_json"] or "{}")
+        items.append({
+            "analysis_id": row["analysis_id"],
+            "filename": row["filename"],
+            "file_path": row["file_path"],
+            "transcript": row["transcript"],
+            "summary": row["summary"],
+            "keyframes": json.loads(row["keyframes_json"] or "[]"),
+            "metadata": metadata,
+            "transcript_url": f"/video_transcript?analysis_id={urllib.parse.quote(row['analysis_id'])}",
+            "keyframes_url": f"/video_keyframes?analysis_id={urllib.parse.quote(row['analysis_id'])}",
+            "created_at": row["created_at"],
+        })
+
+    bac_log(f"BAC: GET /video_analyses returned count={len(items)}")
+    return jsonify({"count": len(items), "items": items})
+
+
+@app.route("/video_transcript", methods=["GET"])
+def video_transcript():
+    analysis_id = request.args.get("analysis_id", "").strip()
+    bac_log(f"BAC: GET /video_transcript analysis_id={analysis_id}")
+    if not analysis_id:
+        return jsonify({"error": "analysis_id is required"}), 400
+
+    ensure_video_db()
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT transcript, metadata_json FROM video_analyses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return jsonify({"error": "Video analysis not found"}), 404
+
+    metadata = json.loads(row["metadata_json"] or "{}")
+    transcript_path = metadata.get("transcript_path", "")
+    if transcript_path and _is_under_uploads(transcript_path) and os.path.exists(transcript_path):
+        bac_log(f"BAC: /video_transcript serving file {transcript_path}")
+        return send_file(transcript_path, mimetype="text/plain; charset=utf-8")
+
+    bac_log("BAC: /video_transcript serving transcript from DB field")
+    return (row["transcript"] or "", 200, {"Content-Type": "text/plain; charset=utf-8"})
+
+
+@app.route("/video_keyframes", methods=["GET"])
+def video_keyframes():
+    analysis_id = request.args.get("analysis_id", "").strip()
+    bac_log(f"BAC: GET /video_keyframes analysis_id={analysis_id}")
+    if not analysis_id:
+        return jsonify({"error": "analysis_id is required"}), 400
+
+    ensure_video_db()
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT keyframes_json FROM video_analyses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return jsonify({"error": "Video analysis not found"}), 404
+
+    keyframes = json.loads(row["keyframes_json"] or "[]")
+    cards = []
+    for frame in keyframes:
+        idx = int(frame.get("index", -1))
+        ts = frame.get("timestamp_seconds", 0)
+        src = f"/video_keyframe?analysis_id={urllib.parse.quote(analysis_id)}&index={idx}"
+        cards.append(
+            f'<div style="display:inline-block;margin:8px;text-align:center;">'
+            f'<img src="{src}" alt="frame {idx}" style="width:220px;height:130px;object-fit:cover;border:1px solid #ddd;border-radius:6px;">'
+            f'<div style="font-family:Segoe UI,Tahoma,sans-serif;font-size:12px;color:#334;">frame {idx} @ {ts}s</div>'
+            f"</div>"
+        )
+
+    html = (
+        "<html><head><meta charset='utf-8'><title>Video Keyframes</title></head><body "
+        "style='margin:16px;font-family:Segoe UI,Tahoma,sans-serif;'>"
+        f"<h3 style='margin:0 0 12px;'>Keyframes ({len(cards)})</h3>"
+        f"{''.join(cards) if cards else '<p>No keyframes found.</p>'}"
+        "</body></html>"
+    )
+    bac_log(f"BAC: /video_keyframes returning gallery count={len(cards)}")
+    return html
+
+
+@app.route("/video_keyframe", methods=["GET"])
+def video_keyframe():
+    analysis_id = request.args.get("analysis_id", "").strip()
+    index_raw = request.args.get("index", "").strip()
+    bac_log(f"BAC: GET /video_keyframe analysis_id={analysis_id} index={index_raw}")
+    if not analysis_id:
+        return jsonify({"error": "analysis_id is required"}), 400
+
+    try:
+        frame_index = int(index_raw)
+    except ValueError:
+        return jsonify({"error": "index must be an integer"}), 400
+
+    ensure_video_db()
+    conn = sqlite3.connect(VIDEO_DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT keyframes_json FROM video_analyses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return jsonify({"error": "Video analysis not found"}), 404
+
+    keyframes = json.loads(row["keyframes_json"] or "[]")
+    frame = next((item for item in keyframes if int(item.get("index", -1)) == frame_index), None)
+    if not frame:
+        return jsonify({"error": "Keyframe not found"}), 404
+
+    frame_path = os.path.abspath(frame.get("path") or "")
+    if not frame_path or not os.path.exists(frame_path):
+        return jsonify({"error": "Keyframe image file is missing"}), 404
+
+    if not _is_under_uploads(frame_path):
+        return jsonify({"error": "Keyframe path is outside allowed directory"}), 403
+
+    bac_log(f"BAC: /video_keyframe serving {frame_path}")
+    return send_file(frame_path)
+
+
 @app.route("/analyze_file", methods=["POST", "GET"])
 def analyze_file():
+    bac_log_major(f"BAC: /analyze_file started method={request.method}")
     if request.method == "GET":
         file_id = request.args.get("file_id", "").strip()
+        bac_log(f"BAC: /analyze_file GET file_id={file_id}")
         if not file_id:
             return jsonify({"error": "file_id is required"}), 400
 
@@ -677,8 +1202,10 @@ def analyze_file():
         path = file.get("path")
         ext = os.path.splitext(path)[1].lower()
         if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}:
+            bac_log(f"BAC: /analyze_file GET routing to image analysis path={path}")
             analysis = analyze_image(path)
         else:
+            bac_log(f"BAC: /analyze_file GET routing to text analysis path={path}")
             text = ""
             try:
                 text = parse_file(path)
@@ -686,9 +1213,11 @@ def analyze_file():
                 bac_log(f"BAC: /analyze_file parse_file failed for {path}: {exc}")
             text = text or file.get("text_excerpt") or ""
             analysis = analyze_text_content(text)
+        bac_log_major(f"BAC: /analyze_file GET completed file_id={file_id}")
         return jsonify({"status": "ok", "file_id": file_id, "name": file.get("name"), "analysis": analysis})
 
     files = request.files.getlist("file")
+    bac_log(f"BAC: /analyze_file POST file_count={len(files)}")
     if not files:
         return jsonify({"error": "No file uploaded"}), 400
     ocr_hints = request.form.getlist("ocr_text")
@@ -701,11 +1230,20 @@ def analyze_file():
         save_path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
         os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
         file.save(save_path)
+        bac_log(f"BAC: /analyze_file POST saved file[{index}] name={filename} path={save_path}")
 
         ext = os.path.splitext(save_path)[1].lower()
+        bac_log(f"BAC: /analyze_file POST file[{index}] ext={ext}")
+
+        if ext in VIDEO_EXTS:
+            bac_log(f"BAC: /analyze_file POST file[{index}] routing to video analysis")
+            analysis = analyze_video_offline(save_path, filename)
+            results.append({"filename": filename, "analysis": analysis})
+            continue
 
         # Handle images directly with local analysis — skip text indexing.
         if ext in image_exts:
+            bac_log(f"BAC: /analyze_file POST file[{index}] routing to image analysis")
             hint = ocr_hints[index] if index < len(ocr_hints) else ""
             analysis = analyze_image(save_path, ocr_hint=hint)
             results.append({"filename": filename, "analysis": analysis})
@@ -731,6 +1269,7 @@ def analyze_file():
         except Exception as exc:
             bac_log(f"BAC: /analyze_file parse_file failed for {save_path}: {exc}")
         analysis = analyze_text_content(text or doc_record.get("text_excerpt") or "")
+        bac_log(f"BAC: /analyze_file POST file[{index}] text analysis completed")
         results.append({"filename": filename, "document": doc_record, "analysis": analysis})
 
     overall_description = ""
@@ -744,6 +1283,7 @@ def analyze_file():
                     file_summaries.append(f"{item['filename']} -> {desc}")
         overall_description = "\n---\n".join(file_summaries)
 
+    bac_log_major(f"BAC: /analyze_file POST completed results={len(results)}")
     return jsonify({"status": "ok", "files": results, "overall_analysis": overall_description})
 
 

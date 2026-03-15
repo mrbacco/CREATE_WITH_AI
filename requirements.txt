@@ -4,3 +4,6 @@ ollama
 pypdf
 Pillow
 pytesseract
+openai-whisper
+opencv-python
+imageio-ffmpeg

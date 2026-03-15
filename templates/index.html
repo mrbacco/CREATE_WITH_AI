@@ -12,18 +12,16 @@
 
 <main class="app-shell">
 <aside class="side-rail">
-<div class="brand">LLMs Router</div>
-<h1>LLMs comparison tool and router</h1>
-<p class="subtitle">Attach files, switch single or multiple mode, and run grounded prompts in one workspace.</p>
+<div class="brand">Extract &amp; Create with AI</div>
+<h1>Extract &amp; Create with AI</h1>
+<p class="subtitle">Extract insights from files, images, and videos, then create grounded outputs in one workspace.</p>
 <div class="rail-card">
 <div class="rail-label">Status</div>
 <div id="uploadStatus" class="upload-status">Optional: choose files/images from the + menu, then send.</div>
-<div id="documentsInfo" class="documents-info"></div>
 <div id="readFilePanel" class="read-file-panel">
-  <div class="field-label">Upload or select indexed doc: Read File Text + Analyze</div>
-  <input type="text" id="documentInput" placeholder="Enter document ID to read from index (optional)" style="width:100%; margin-bottom:6px;" />
-  <button type="button" id="readFileBtn">Read File Text</button>
-  <div class="hint" style="margin-top:6px;">Will read indexed document if doc ID is present, else it analyzes uploaded files (selected in left file-input)</div>
+	<div class="field-label">Upload files and extract content</div>
+	<button type="button" id="readFileBtn">Extract Content of Files</button>
+	<div class="hint" style="margin-top:6px;">Select one or more files, then extract and analyze them locally.</div>
 </div>
 <div id="analyzeFilePanel" class="read-file-panel" style="margin-top: 12px; display:none;">
 </div>
@@ -33,6 +31,15 @@
 <div class="output-wrap">
 <div class="section-title">Output</div>
 <div id="output" class="output-area"></div>
+</div>
+
+<div class="extraction-wrap">
+<div class="section-title">Saved Video Extractions</div>
+<div class="extraction-header-row">
+<div class="extraction-subtitle">Open transcript and keyframes saved from your recent video analyses.</div>
+<button type="button" id="refreshExtractionBtn" class="secondary-btn">Refresh</button>
+</div>
+<div id="extractionList" class="extraction-list">No extracted video info available yet.</div>
 </div>
 
 <div class="composer">

@@ -35,6 +35,7 @@ body {
 
 .side-rail,
 .output-wrap,
+.extraction-wrap,
 .composer,
 .modal-card {
   background: var(--panel);
@@ -129,6 +130,71 @@ h1 {
 
 .composer {
   padding: 12px;
+}
+
+.extraction-wrap {
+  padding: 12px;
+}
+
+.extraction-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.extraction-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.extraction-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: #fbfdff;
+}
+
+.extraction-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+}
+
+.extraction-item-title {
+  margin: 0;
+  font-size: 13px;
+  color: #0f2d52;
+}
+
+.extraction-item-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.extraction-item-links {
+  margin-top: 6px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.extraction-item-links a {
+  font-size: 12px;
+  color: #174a80;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.extraction-item-links a:hover {
+  text-decoration: underline;
 }
 
 .field-label {
@@ -394,6 +460,22 @@ button:disabled {
 
 .read-file-panel {
   margin-top: 10px;
+}
+
+.secondary-btn {
+  border: 1px solid #c2d6ea;
+  background: #eef4fb;
+  color: #174a80;
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 5px 10px;
+  height: 30px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.secondary-btn:hover {
+  background: #dfebf8;
 }
 
 #readFileBtn {

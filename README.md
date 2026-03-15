@@ -47,8 +47,19 @@ Only models with configured keys are exposed in the UI.
 - Images (.png, .jpg, .jpeg, .webp, .gif, .bmp, .tiff) are analyzed locally on the app server via Pillow-based heuristics.
 - Browser-side OCR is performed with Tesseract.js and sent to the backend as OCR hints during Read File Text analysis.
 - OCR text extraction is attempted locally with pytesseract (requires Tesseract OCR installed on the host OS).
+- Videos (.mp4, .mov, .avi, .mkv, .webm) are processed with an offline pipeline:
+  - FFmpeg extracts audio
+  - Whisper transcribes speech
+  - OpenCV extracts keyframes
+  - Ollama summarizes transcript text
+  - Results are stored locally in SQLite (`data/video_analysis.db`)
 - The Read File Text button now prioritizes selected files over document ID lookup.
 - If no file is selected, an optional document ID can analyze an already-indexed record.
+
+## Offline video metadata APIs
+
+- `POST /analyze_file` supports direct video uploads and runs the offline video pipeline.
+- `GET /video_analyses` returns stored video analysis metadata from the local database.
 
 ## Project layout
 

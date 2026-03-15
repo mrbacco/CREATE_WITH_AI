@@ -13,6 +13,63 @@ return String(text)
   .replaceAll("'","&#39;")
 }
 
+function trimText(text, maxLen){
+const value=String(text||"")
+if(value.length<=maxLen) return value
+return `${value.slice(0,maxLen)}...`
+}
+
+function formatDateTime(value){
+if(!value) return ""
+const dt=new Date(value)
+if(Number.isNaN(dt.getTime())) return String(value)
+return dt.toLocaleString()
+}
+
+function renderExtractionLibrary(items){
+const list=document.getElementById("extractionList")
+if(!list) return
+if(!Array.isArray(items) || items.length===0){
+list.textContent="No extracted video info available yet."
+return
+}
+
+list.innerHTML=items.map((item)=>{
+const filename=escapeHtml((item && item.filename) || "(unknown file)")
+const created=escapeHtml(formatDateTime(item && item.created_at))
+const keyframes=Array.isArray(item && item.keyframes) ? item.keyframes : []
+const transcriptUrl=escapeHtml((item && item.transcript_url) || "")
+const keyframesUrl=escapeHtml((item && item.keyframes_url) || "")
+
+return `
+<article class="extraction-item">
+<h4 class="extraction-item-title">${filename}</h4>
+<div class="extraction-item-meta">${created} | ${keyframes.length} keyframe(s)</div>
+<div class="extraction-item-links">
+${transcriptUrl ? `<a href="${transcriptUrl}" target="_blank" rel="noopener">Open transcript</a>` : ""}
+${keyframesUrl ? `<a href="${keyframesUrl}" target="_blank" rel="noopener">Open keyframes</a>` : ""}
+</div>
+</article>
+`
+}).join("")
+}
+
+async function loadVideoAnalyses(){
+const extractionList=document.getElementById("extractionList")
+if(!extractionList) return
+extractionList.textContent="Loading extraction info..."
+try{
+const res=await fetch("/video_analyses?limit=12")
+const data=await res.json()
+if(!res.ok){
+throw new Error(data.error || `Failed with status ${res.status}`)
+}
+renderExtractionLibrary(data.items || [])
+}catch(err){
+extractionList.textContent=`Failed to load extraction info: ${err.message}`
+}
+}
+
 function renderCompareTable(data){
 const rows=Object.entries(data).map(([model,response])=>`
 <tr>
@@ -250,29 +307,8 @@ renderModeSummary()
 let indexedDocuments=[]
 
 function renderDocumentsInfo(data){
-const target=document.getElementById("documentsInfo")
-if(!target) return
 const docs=(data&&data.documents)||[]
 indexedDocuments = docs
-const input=document.getElementById("documentInput")
-if(input){
-  if(docs.length===0){
-    input.value=""
-    input.placeholder="No indexed documents available"
-  } else {
-    input.placeholder=`Enter file_id or use indexed first: ${docs[0].file_id}`
-    if(!input.value){
-      input.value=docs[0].file_id
-    }
-  }
-}
-if(docs.length===0){
-  target.textContent="No indexed documents yet."
-  return
-}
-const names=docs.slice(0,5).map((d)=>`${d.name} (${d.chunk_count} chunks)`).join(" | ")
-const extra=docs.length>5 ? ` | +${docs.length-5} more` : ""
-target.textContent=`Indexed documents: ${docs.length}. ${names}${extra}`
 }
 
 async function loadDocuments(){
@@ -462,6 +498,7 @@ setLoadingState(false,output)
 
 loadModels()
 loadDocuments()
+loadVideoAnalyses()
 applyModeVisibility()
 renderFileChips()
 renderModeSummary()
@@ -485,6 +522,11 @@ singleModelSelect.addEventListener("change",renderModeSummary)
 const comparePanel=document.getElementById("compareModels")
 if(comparePanel){
 comparePanel.addEventListener("change",renderModeSummary)
+}
+
+const refreshExtractionBtn=document.getElementById("refreshExtractionBtn")
+if(refreshExtractionBtn){
+refreshExtractionBtn.addEventListener("click",loadVideoAnalyses)
 }
 
 document.getElementById('readFileBtn').addEventListener('click', function() {
@@ -601,6 +643,7 @@ async function readDocument(){
     } else {
       output.textContent = JSON.stringify(analyzeData, null, 2)
     }
+    await loadVideoAnalyses()
 
   } catch(err){
     output.textContent = `Read + Analyze failed: ${err.message}`
