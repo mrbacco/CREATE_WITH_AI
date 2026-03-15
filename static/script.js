@@ -43,7 +43,7 @@ const addPoint=(value)=>{
   const key=item.toLowerCase()
   if(seen.has(key)) return
   seen.add(key)
-  points.push(item.length>220 ? `${item.slice(0,220)}...` : item)
+  points.push(item)
 }
 
 const paragraphs=clean.split(/\n{2,}/).map((p)=>p.trim()).filter(Boolean)
@@ -75,7 +75,7 @@ if(!clean){
 const points=buildWebpageBulletPoints(clean)
 const bulletItems=points.length>0
   ? points.map((item)=>`<li>${escapeHtml(item)}</li>`).join("")
-  : `<li>${escapeHtml(clean.length>220 ? `${clean.slice(0,220)}...` : clean)}</li>`
+  : `<li>${escapeHtml(clean)}</li>`
 
 output.innerHTML=`
 <div class="web-extract-output">
@@ -97,7 +97,7 @@ if(!clean){
 const points=buildWebpageBulletPoints(clean)
 const bulletItems=points.length>0
   ? points.map((item)=>`<li>${escapeHtml(item)}</li>`).join("")
-  : `<li>${escapeHtml(clean.length>220 ? `${clean.slice(0,220)}...` : clean)}</li>`
+  : `<li>${escapeHtml(clean)}</li>`
 
 output.innerHTML=`
 <div class="web-extract-output">
@@ -137,13 +137,28 @@ for(const item of files){
 
   const desc=(analysis.analytical_description || analysis.description || "").trim()
   if(desc){
-    bullets.push(`${name}: ${desc.length>260 ? `${desc.slice(0,260)}...` : desc}`)
+    bullets.push(`${name}: ${desc}`)
   }
 
   const summary=(analysis.summary || "").trim()
   if(summary){
     const lead=summary.split(/(?<=[.!?])\s+/)[0] || summary
-    bullets.push(`${name}: Opening summary insight: ${lead.length>220 ? `${lead.slice(0,220)}...` : lead}`)
+    bullets.push(`${name}: Opening summary insight: ${lead}`)
+  }
+
+  const detailed=(analysis.detailed_description || "").trim()
+  if(detailed && detailed !== desc){
+    bullets.push(`${name}: Detailed analysis: ${detailed}`)
+  }
+
+  const visibleText=(analysis.visible_text || "").trim()
+  if(visibleText){
+    bullets.push(`${name}: Detected text in image: ${visibleText}`)
+  }
+
+  const errorText=(analysis.error || "").trim()
+  if(errorText){
+    bullets.push(`${name}: Analysis error: ${errorText}`)
   }
 }
 
@@ -155,7 +170,7 @@ for(const b of bullets){
   seen.add(key)
   deduped.push(b)
 }
-return deduped.slice(0,18)
+return deduped.slice(0,30)
 }
 
 function renderDocumentAnalysisBullets(output, sourceLabel, analyzeData){
