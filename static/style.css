@@ -462,6 +462,36 @@ button:disabled {
   margin-top: 10px;
 }
 
+.rail-link-control {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#railUrlInput {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+#railAddLinkBtn {
+  width: 100%;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  height: 34px;
+  font-weight: 700;
+}
+
+#railAddLinkBtn:hover {
+  background: var(--accent-strong);
+}
+
 .secondary-btn {
   border: 1px solid #c2d6ea;
   background: #eef4fb;
@@ -533,6 +563,39 @@ button:disabled {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.45;
+}
+
+.web-extract-output {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfdff;
+  padding: 10px;
+}
+
+.web-extract-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #174a80;
+}
+
+.web-extract-source {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.web-extract-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.web-extract-list li {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #17324f;
 }
 
 .modal-backdrop {

@@ -22,6 +22,11 @@
 	<div class="field-label">Upload files and extract content</div>
 	<button type="button" id="readFileBtn">Extract Content of Files</button>
 	<div class="hint" style="margin-top:6px;">Select one or more files, then extract and analyze them locally.</div>
+	<div class="field-label" style="margin-top:10px;">Extract From Web Link</div>
+	<div class="rail-link-control">
+		<input type="url" id="railUrlInput" placeholder="https://example.com/article" />
+		<button type="button" id="railAddLinkBtn" onclick="addRailLink()">Extract Content of Web Link</button>
+	</div>
 </div>
 <div id="analyzeFilePanel" class="read-file-panel" style="margin-top: 12px; display:none;">
 </div>

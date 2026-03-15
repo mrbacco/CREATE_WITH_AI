@@ -26,6 +26,157 @@ if(Number.isNaN(dt.getTime())) return String(value)
 return dt.toLocaleString()
 }
 
+function buildWebpageBulletPoints(text, maxItems=14){
+const clean=String(text||"")
+  .replace(/\r/g, "")
+  .replace(/\t/g, " ")
+  .replace(/[ ]{2,}/g, " ")
+  .trim()
+if(!clean) return []
+
+const points=[]
+const seen=new Set()
+
+const addPoint=(value)=>{
+  const item=String(value||"").replace(/\s+/g, " ").trim()
+  if(item.length<35) return
+  const key=item.toLowerCase()
+  if(seen.has(key)) return
+  seen.add(key)
+  points.push(item.length>220 ? `${item.slice(0,220)}...` : item)
+}
+
+const paragraphs=clean.split(/\n{2,}/).map((p)=>p.trim()).filter(Boolean)
+for(const paragraph of paragraphs){
+  if(points.length>=maxItems) break
+  const sentence=paragraph.split(/(?<=[.!?])\s+/)[0] || paragraph
+  addPoint(sentence)
+}
+
+if(points.length<maxItems){
+  const sentences=clean.split(/(?<=[.!?])\s+/)
+  for(const sentence of sentences){
+    if(points.length>=maxItems) break
+    addPoint(sentence)
+  }
+}
+
+return points
+}
+
+function renderWebpageExtraction(output, url, extractedText){
+if(!output) return
+const clean=String(extractedText||"").trim()
+if(!clean){
+  output.textContent="No extractable text was found on this web page."
+  return
+}
+
+const points=buildWebpageBulletPoints(clean)
+const bulletItems=points.length>0
+  ? points.map((item)=>`<li>${escapeHtml(item)}</li>`).join("")
+  : `<li>${escapeHtml(clean.length>220 ? `${clean.slice(0,220)}...` : clean)}</li>`
+
+output.innerHTML=`
+<div class="web-extract-output">
+  <div class="web-extract-title">Web Link Extraction</div>
+  <div class="web-extract-source">Source: ${escapeHtml(url)}</div>
+  <ul class="web-extract-list">${bulletItems}</ul>
+</div>
+`
+}
+
+function renderDocumentExtraction(output, label, extractedText){
+if(!output) return
+const clean=String(extractedText||"").trim()
+if(!clean){
+  output.textContent="No extractable content was found."
+  return
+}
+
+const points=buildWebpageBulletPoints(clean)
+const bulletItems=points.length>0
+  ? points.map((item)=>`<li>${escapeHtml(item)}</li>`).join("")
+  : `<li>${escapeHtml(clean.length>220 ? `${clean.slice(0,220)}...` : clean)}</li>`
+
+output.innerHTML=`
+<div class="web-extract-output">
+  <div class="web-extract-title">Document Extraction</div>
+  <div class="web-extract-source">Source: ${escapeHtml(label || "uploaded file")}</div>
+  <ul class="web-extract-list">${bulletItems}</ul>
+</div>
+`
+}
+
+function buildDocumentAnalysisBullets(analyzeData){
+const bullets=[]
+const files=Array.isArray(analyzeData && analyzeData.files) ? analyzeData.files : []
+
+if(files.length===0) return bullets
+
+for(const item of files){
+  const name=(item && item.filename) || "document"
+  const analysis=(item && item.analysis) || {}
+  if(typeof analysis !== "object") continue
+
+  const wc=Number(analysis.word_count || 0)
+  const sc=Number(analysis.sentence_count || 0)
+  const uc=Number(analysis.unique_words || 0)
+  if(wc>0){
+    bullets.push(`${name}: ${wc} words across ${sc} sentences, with ${uc} unique terms.`)
+  }
+
+  const topWords=Array.isArray(analysis.top_words) ? analysis.top_words : []
+  if(topWords.length>0){
+    const topTerms=topWords
+      .slice(0,5)
+      .map((entry)=>`${entry.word} (${entry.count})`)
+      .join(", ")
+    bullets.push(`${name}: Most frequent terms are ${topTerms}.`)
+  }
+
+  const desc=(analysis.analytical_description || analysis.description || "").trim()
+  if(desc){
+    bullets.push(`${name}: ${desc.length>260 ? `${desc.slice(0,260)}...` : desc}`)
+  }
+
+  const summary=(analysis.summary || "").trim()
+  if(summary){
+    const lead=summary.split(/(?<=[.!?])\s+/)[0] || summary
+    bullets.push(`${name}: Opening summary insight: ${lead.length>220 ? `${lead.slice(0,220)}...` : lead}`)
+  }
+}
+
+const deduped=[]
+const seen=new Set()
+for(const b of bullets){
+  const key=String(b).toLowerCase()
+  if(seen.has(key)) continue
+  seen.add(key)
+  deduped.push(b)
+}
+return deduped.slice(0,18)
+}
+
+function renderDocumentAnalysisBullets(output, sourceLabel, analyzeData){
+if(!output) return
+const bullets=buildDocumentAnalysisBullets(analyzeData)
+if(bullets.length===0){
+  const fallback=(analyzeData && analyzeData.overall_analysis) || JSON.stringify(analyzeData || {}, null, 2)
+  renderDocumentExtraction(output, sourceLabel, fallback)
+  return
+}
+
+const bulletItems=bullets.map((item)=>`<li>${escapeHtml(item)}</li>`).join("")
+output.innerHTML=`
+<div class="web-extract-output">
+  <div class="web-extract-title">Document Analysis</div>
+  <div class="web-extract-source">Source: ${escapeHtml(sourceLabel || "uploaded file")}</div>
+  <ul class="web-extract-list">${bulletItems}</ul>
+</div>
+`
+}
+
 function renderExtractionLibrary(items){
 const list=document.getElementById("extractionList")
 if(!list) return
@@ -166,13 +317,26 @@ return fileInput && fileInput.files ? [...fileInput.files] : []
 }
 
 async function addLink(){
-  const url = document.getElementById("urlInput").value.trim()
+  const urlInput=document.getElementById("urlInput")
+  const url = (urlInput && urlInput.value || "").trim()
+  await addLinkByUrl(url, urlInput)
+}
+
+async function addRailLink(){
+  const railInput=document.getElementById("railUrlInput")
+  const url=(railInput && railInput.value || "").trim()
+  await addLinkByUrl(url, railInput)
+}
+
+async function addLinkByUrl(url, sourceInput){
   const status=document.getElementById("uploadStatus")
+  const output=document.getElementById("output")
   if(!url){
     status.textContent = "Enter a URL first."
     return
   }
   status.textContent = `Indexing URL: ${url}`
+  if(output) output.textContent = "Scraping webpage and extracting content..."
   try {
     const res = await fetch("/index_url", {
       method: "POST",
@@ -183,11 +347,28 @@ async function addLink(){
     if(!res.ok){
       throw new Error(data.error || `Index URL failed: ${res.status}`)
     }
-    status.textContent = `URL indexed: ${data.document ? data.document.name : url}`
-    document.getElementById("urlInput").value = ""
+    const doc=data.document || {}
+    const fileId=doc.file_id || ""
+    status.textContent = `URL indexed: ${doc.name ? doc.name : url}`
+
+    if(fileId){
+      const readRes=await fetch(`/read_file?file_id=${encodeURIComponent(fileId)}`)
+      const readData=await readRes.json()
+      if(!readRes.ok){
+        throw new Error(readData.error || `Read URL content failed: ${readRes.status}`)
+      }
+      const extractedText=(readData.text || "").trim()
+      renderWebpageExtraction(output, url, extractedText)
+      status.textContent = `URL extracted: ${doc.name ? doc.name : url}`
+    } else if(output){
+      output.textContent = "URL was indexed but no readable document ID was returned."
+    }
+
+    if(sourceInput) sourceInput.value = ""
     await loadDocuments()
   } catch(err){
     status.textContent = `URL indexing error: ${err.message}`
+    if(output) output.textContent = `Web link extraction failed: ${err.message}`
   }
 }
 
@@ -548,6 +729,7 @@ if(!inMenu && !inBtn) toolsMenu.classList.add("hidden")
 })
 
 window.closeMultiModelModal=closeMultiModelModal
+window.addRailLink=addRailLink
 
 async function readLocalFile(file){
   return new Promise((resolve, reject) => {
@@ -603,7 +785,7 @@ async function readDocument(){
       if(!res.ok){
         throw new Error(data.error || `Failed with status ${res.status}`)
       }
-      output.textContent = JSON.stringify(data.analysis || data, null, 2)
+      renderDocumentExtraction(output, data.name || fileId, JSON.stringify(data.analysis || data, null, 2))
       return
     }
 
@@ -638,11 +820,8 @@ async function readDocument(){
       throw new Error(analyzeData.error || `Failed with status ${analyzeRes.status}`)
     }
 
-    if(analyzeData.overall_analysis){
-      output.textContent = analyzeData.overall_analysis
-    } else {
-      output.textContent = JSON.stringify(analyzeData, null, 2)
-    }
+    const sourceLabel=attachedFiles.map((f)=>f.name).join(", ")
+    renderDocumentAnalysisBullets(output, sourceLabel, analyzeData)
     await loadVideoAnalyses()
 
   } catch(err){
